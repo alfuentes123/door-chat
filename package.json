@@ -1,0 +1,23 @@
+{
+  "name": "nest-chat",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "api": "npm run start:dev --workspace chat-api",
+    "web": "npm run dev --workspace chat-web",
+    "build": "npm run build --workspace chat-api && npm run build --workspace chat-web"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "overrides": {
+    "multer": "2.5.0"
+  }
+}
