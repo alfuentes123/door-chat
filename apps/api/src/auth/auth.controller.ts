@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Post, Session } from '@nestjs/common';
+import { Body, Controller, Get, Post, Req, Res, Session } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { User } from '../users/entities/user.entity';
 import { RegisterDto } from './dto/register.dto';
 import session from 'express-session';
 import { LoginDto } from './dto/login.dto';
+import type { Request, Response } from 'express';
 
 
 
@@ -26,9 +27,12 @@ export class AuthController {
   }
 
   @Post('logout')
-  async logout(@Session() session: session.SessionData) {
-    session.userId = undefined;
-    console.log('Logged out user');
+  logout(@Req() req: Request, @Res() res: Response) {
+    req.session.destroy((error) => {
+      if (error) return res.status(500).send('Logout failed');
+      res.clearCookie('connect.sid');
+      res.json({ message: 'Logged out' });
+    });
   }
 
   @Get('me')
