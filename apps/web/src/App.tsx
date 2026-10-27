@@ -51,6 +51,42 @@ function App() {
   const [loadingMessages, setLoadingMessages] = useState(false)
   const [sending, setSending] = useState(false)
 
+  const signedInUserId = currentUser?.id
+  const openChatUserId = selectedUser?.id
+
+  useEffect(() => {
+    if (!signedInUserId) return
+
+    socket.connect()
+    return () => {
+      socket.disconnect()
+    }
+  }, [signedInUserId])
+
+  useEffect(() => {
+    if (!signedInUserId || !openChatUserId) return
+
+    let active = true
+
+    const refreshOpenChat = () => {
+      void api<Message[]>(`/chat/${openChatUserId}/messages`)
+        .then((updatedMessages) => {
+          if (!active) return
+          setMessages(updatedMessages)
+          setMessagesError(null)
+        })
+        .catch((error) => {
+          if (active) setMessagesError(errorMessage(error))
+        })
+    }
+
+    socket.on('messages.changed', refreshOpenChat)
+    return () => {
+      active = false
+      socket.off('messages.changed', refreshOpenChat)
+    }
+  }, [signedInUserId, openChatUserId])
+
   const loadUsers = async () => {
     setUsersError(null)
 
@@ -123,6 +159,10 @@ function App() {
 
     try {
       await api('/auth/register', 'POST', registerForm)
+      const user = await api<User | null>('/auth/me')
+      if (!user) throw new Error('Unable to load your account')
+
+      setCurrentUser(user)
       setAuthenticated(true)
       await loadUsers()
     } catch (error) {
@@ -136,6 +176,10 @@ function App() {
 
     try {
       await api('/auth/login', 'POST', loginForm)
+      const user = await api<User | null>('/auth/me')
+      if (!user) throw new Error('Unable to load your account')
+
+      setCurrentUser(user)
       setAuthenticated(true)
       await loadUsers()
     } catch (error) {
@@ -175,7 +219,11 @@ function App() {
         content: draft,
       })
 
-      setMessages((currentMessages) => [...currentMessages, savedMessage])
+      setMessages((currentMessages) => (
+        currentMessages.some((message) => message.id === savedMessage.id)
+          ? currentMessages
+          : [...currentMessages, savedMessage]
+      ))
       setDraft('')
     } catch (error) {
       setSendError(errorMessage(error))
