@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Message } from './entities/message.entity';
 import { Repository } from 'typeorm';
@@ -20,7 +20,7 @@ export class ChatService {
 
         const recipient = await this.usersService.findPublicById(dto.recipientId);
         if (!recipient) {
-            throw new BadRequestException('Recipient does not exist.');
+            throw new NotFoundException('Recipient does not exist.');
         }
 
         const trimmedContent = dto.content.trim();

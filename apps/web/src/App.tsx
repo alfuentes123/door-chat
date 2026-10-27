@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError } from './lib/api'
 import './App.css'
 import { socket } from './lib/socket';
@@ -19,10 +19,16 @@ type Message = {
   createdAt: string
 }
 
+type PendingSend = {
+  recipientId: string
+  clientMessageId: string
+  content: string
+}
+
 type AuthMode = 'register' | 'login' | null
 
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : 'An unexpected error occurred'
+function errorMessage(error: unknown, fallback = 'An unexpected error occurred') {
+  return error instanceof Error ? error.message : fallback
 }
 
 function App() {
@@ -50,15 +56,56 @@ function App() {
   const [logoutError, setLogoutError] = useState<string | null>(null)
   const [loadingMessages, setLoadingMessages] = useState(false)
   const [sending, setSending] = useState(false)
+  const [isSigningIn, setIsSigningIn] = useState(false)
+  const [pendingSend, setPendingSend] = useState<PendingSend | null>(null)
+  const [sendNeedsCorrection, setSendNeedsCorrection] = useState(false)
+  const [socketConnected, setSocketConnected] = useState(socket.connected)
+  const sendRequest = useRef<PendingSend | null>(null)
+  const activeChatUserId = useRef<string | undefined>(undefined)
+  const historyRequestId = useRef(0)
 
   const signedInUserId = currentUser?.id
   const openChatUserId = selectedUser?.id
+
+  useEffect(() => {
+    let active = true
+
+    const onConnect = () => {
+      setSocketConnected(true)
+      if (!signedInUserId || !openChatUserId) return
+
+      const requestId = ++historyRequestId.current
+      void api<Message[]>(`/chat/${openChatUserId}/messages`)
+        .then((saved) => {
+          if (!active || requestId !== historyRequestId.current) return
+          setMessages(saved)
+          setMessagesError(null)
+          setLoadingMessages(false)
+        })
+        .catch((error) => {
+          if (active && requestId === historyRequestId.current) {
+            setMessagesError(errorMessage(error, 'Could not load messages'))
+            setLoadingMessages(false)
+          }
+        })
+    }
+    const onDisconnect = () => setSocketConnected(false)
+
+    socket.on('connect', onConnect)
+    socket.on('disconnect', onDisconnect)
+    return () => {
+      active = false
+      socket.off('connect', onConnect)
+      socket.off('disconnect', onDisconnect)
+    }
+  }, [signedInUserId, openChatUserId])
 
   useEffect(() => {
     if (!signedInUserId) return
 
     socket.connect()
     return () => {
+      sendRequest.current = null
       socket.disconnect()
     }
   }, [signedInUserId])
@@ -69,14 +116,19 @@ function App() {
     let active = true
 
     const refreshOpenChat = () => {
+      const requestId = ++historyRequestId.current
       void api<Message[]>(`/chat/${openChatUserId}/messages`)
         .then((updatedMessages) => {
-          if (!active) return
+          if (!active || requestId !== historyRequestId.current) return
           setMessages(updatedMessages)
           setMessagesError(null)
+          setLoadingMessages(false)
         })
         .catch((error) => {
-          if (active) setMessagesError(errorMessage(error))
+          if (active && requestId === historyRequestId.current) {
+            setMessagesError(errorMessage(error, 'Could not load messages'))
+            setLoadingMessages(false)
+          }
         })
     }
 
@@ -127,20 +179,24 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!selectedUser) return
+    activeChatUserId.current = openChatUserId
+    if (!signedInUserId || !openChatUserId) return
 
     let active = true
 
     const loadMessages = async () => {
       setLoadingMessages(true)
       setMessagesError(null)
-      setSendError(null)
+      setMessages([])
+      const requestId = ++historyRequestId.current
 
       try {
-        const history = await api<Message[]>(`/chat/${selectedUser.id}/messages`)
-        if (active) setMessages(history)
+        const history = await api<Message[]>(`/chat/${openChatUserId}/messages`)
+        if (active && requestId === historyRequestId.current) setMessages(history)
       } catch (error) {
-        if (active) setMessagesError(errorMessage(error))
+        if (active && requestId === historyRequestId.current) {
+          setMessagesError(errorMessage(error, 'Could not load messages'))
+        }
       } finally {
         if (active) setLoadingMessages(false)
       }
@@ -151,7 +207,7 @@ function App() {
     return () => {
       active = false
     }
-  }, [selectedUser])
+  }, [signedInUserId, openChatUserId])
 
   const handleRegister = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -172,6 +228,9 @@ function App() {
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (isSigningIn) return
+
+    setIsSigningIn(true)
     setLoginError(null)
 
     try {
@@ -183,7 +242,9 @@ function App() {
       setAuthenticated(true)
       await loadUsers()
     } catch (error) {
-      setLoginError(errorMessage(error))
+      setLoginError(errorMessage(error, 'Sign-in failed'))
+    } finally {
+      setIsSigningIn(false)
     }
   }
 
@@ -192,6 +253,7 @@ function App() {
 
     try {
       await api('/auth/logout', 'POST')
+      sendRequest.current = null
       setCurrentUser(null)
       setUsers([])
       setSelectedUser(null)
@@ -199,37 +261,62 @@ function App() {
       setAuthenticated(false)
       setAuthMode(null)
       setDraft('')
+      setPendingSend(null)
+      setSending(false)
+      setSendError(null)
+      setSendNeedsCorrection(false)
+      setLoadingMessages(false)
+      setMessagesError(null)
+      setSocketConnected(false)
     } catch (error) {
       setLogoutError(errorMessage(error))
     }
   }
 
-  const handleSend = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    if (!selectedUser || sending) return
+  const submitPendingSend = async (payload: PendingSend) => {
+    if (!signedInUserId || sending || sendRequest.current || sendNeedsCorrection) return
 
+    sendRequest.current = payload
     setSending(true)
     setSendError(null)
 
     try {
-      const clientMessageId = crypto.randomUUID()
-      const savedMessage = await api<Message>('/chat/messages', 'POST', {
-        recipientId: selectedUser.id,
-        clientMessageId,
-        content: draft,
-      })
+      const savedMessage = await api<Message>('/chat/messages', 'POST', payload)
+      if (sendRequest.current !== payload) return
 
-      setMessages((currentMessages) => (
-        currentMessages.some((message) => message.id === savedMessage.id)
-          ? currentMessages
-          : [...currentMessages, savedMessage]
-      ))
+      if (activeChatUserId.current === payload.recipientId) {
+        setMessages((currentMessages) => (
+          currentMessages.some((message) => message.id === savedMessage.id)
+            ? currentMessages
+            : [...currentMessages, savedMessage]
+        ))
+      }
       setDraft('')
+      setPendingSend(null)
+      setSendNeedsCorrection(false)
     } catch (error) {
-      setSendError(errorMessage(error))
+      if (sendRequest.current !== payload) return
+      setSendError(errorMessage(error, 'Send failed'))
+      setSendNeedsCorrection(error instanceof ApiError && (error.status === 400 || error.status === 409))
     } finally {
-      setSending(false)
+      if (sendRequest.current === payload) {
+        sendRequest.current = null
+        setSending(false)
+      }
     }
+  }
+
+  const handleSend = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!signedInUserId || !selectedUser || !draft.trim() || pendingSend || sending || sendRequest.current) return
+
+    const payload: PendingSend = {
+      recipientId: selectedUser.id,
+      clientMessageId: crypto.randomUUID(),
+      content: draft,
+    }
+    setPendingSend(payload)
+    void submitPendingSend(payload)
   }
 
   if (initializing) {
@@ -308,7 +395,9 @@ function App() {
               value={loginForm.password}
               onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })}
             />
-            <button type="submit">Sign in</button>
+            <button type="submit" disabled={isSigningIn}>
+              {isSigningIn ? 'Signing in...' : 'Sign in'}
+            </button>
             {loginError && <p className="error" role="alert">{loginError}</p>}
           </form>
         )}
@@ -341,6 +430,7 @@ function App() {
       <section className="chat-panel" aria-label="Selected chat">
         <header className="chat-header">
           {currentUser && <p className="current-user">Signed in as {currentUser.displayName}</p>}
+          <p role="status">{socketConnected ? 'Live updates connected' : 'Reconnecting...'}</p>
           <button className="logout-button" type="button" onClick={handleLogout}>Log out</button>
         </header>
         {logoutError && <p className="error logout-error" role="alert">{logoutError}</p>}
@@ -371,13 +461,31 @@ function App() {
                   required
                   maxLength={2000}
                   value={draft}
+                  disabled={!!pendingSend}
                   onChange={(event) => setDraft(event.target.value)}
                 />
-                <button type="submit" disabled={sending}>
+                <button type="submit" disabled={sending || !!pendingSend}>
                   {sending ? 'Sending…' : 'Send message'}
                 </button>
               </div>
               {sendError && <p className="error" role="alert">{sendError}</p>}
+              {pendingSend && (
+                <p>Pending message to {users.find((user) => user.id === pendingSend.recipientId)?.displayName ?? 'the original recipient'}.</p>
+              )}
+              {pendingSend && !sending && (
+                <>
+                  {sendNeedsCorrection ? (
+                    <p>Discard this attempt to correct the message before sending again.</p>
+                  ) : (
+                    <button type="button" onClick={() => void submitPendingSend(pendingSend)}>Retry</button>
+                  )}
+                  <button type="button" onClick={() => {
+                    setPendingSend(null)
+                    setSendError(null)
+                    setSendNeedsCorrection(false)
+                  }}>Discard retry</button>
+                </>
+              )}
             </form>
           </>
         ) : (
