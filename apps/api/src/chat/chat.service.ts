@@ -4,12 +4,13 @@ import { Message } from './entities/message.entity';
 import { Repository } from 'typeorm';
 import { UsersService } from '../users/users.service';
 import { SendMessageDto } from './dto/send-message.dto';
+import { ChatGateway } from './chat/chat.gateway';
 
 @Injectable()
 export class ChatService {
     constructor(
         @InjectRepository(Message) private messageRepository: Repository<Message>,
-        private usersService: UsersService
+        private usersService: UsersService, private chatGateway: ChatGateway
     ) {}
 
     async send(senderId: string, dto: SendMessageDto) {
@@ -49,6 +50,7 @@ export class ChatService {
 
         try {
             const savedMessage = await this.messageRepository.save(newMessage);
+            this.chatGateway.notifyMessagesChanged();
             return {
                 id: savedMessage.id,
                 senderId: savedMessage.senderId,

@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { api, ApiError } from './lib/api'
 import './App.css'
+import { socket } from './lib/socket';
+
 
 type User = {
   id: string

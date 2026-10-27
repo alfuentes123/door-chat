@@ -19,5 +19,9 @@
   ],
   "overrides": {
     "multer": "2.5.0"
+  },
+  "dependencies": {
+    "@nestjs/platform-socket.io": "12.2.0",
+    "@nestjs/websockets": "12.2.0"
   }
 }
