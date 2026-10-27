@@ -98,7 +98,19 @@ input:focus-visible {
 }
 
 .user-list button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   text-align: left;
+}
+
+.unseen-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #e5484d;
 }
 
 .user-list button[aria-pressed='true'] {

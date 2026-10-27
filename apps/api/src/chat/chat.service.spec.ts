@@ -20,6 +20,7 @@ const repository = {
   findOneBy: jest.fn(),
   create: jest.fn(),
   save: jest.fn(),
+  createQueryBuilder: jest.fn(),
 };
 const usersService = { findPublicById: jest.fn() };
 const chatGateway = { notifyMessagesChanged: jest.fn() };
@@ -59,5 +60,48 @@ describe('ChatService.send', () => {
     await expect(service.send('alice-id', { ...dto, content: 'Changed' }))
       .rejects.toBeInstanceOf(ConflictException);
     expect(repository.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChatService.incomingSummary', () => {
+  const query = {
+    select: jest.fn().mockReturnThis(),
+    addSelect: jest.fn().mockReturnThis(),
+    distinctOn: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
+    addOrderBy: jest.fn().mockReturnThis(),
+    getRawMany: jest.fn(),
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    for (const method of Object.values(query)) method.mockReturnThis();
+    repository.createQueryBuilder.mockReturnValue(query);
+  });
+
+  it('returns only the latest incoming metadata per sender for the signed-in user', async () => {
+    const summary = [{ senderId: 'bob-id', id: 'incoming-1', createdAt: stored.createdAt }];
+    query.getRawMany.mockResolvedValue(summary);
+
+    await expect(service.incomingSummary('alice-id')).resolves.toEqual(summary);
+
+    expect(query.where).toHaveBeenCalledWith('message.recipientId = :currentUserId', { currentUserId: 'alice-id' });
+    expect(query.distinctOn).toHaveBeenCalledWith(['message.senderId']);
+    expect(query.select).toHaveBeenCalledWith('message.senderId', 'senderId');
+    expect(query.addSelect.mock.calls).toEqual([
+      ['message.id', 'id'],
+      ['message.createdAt', 'createdAt'],
+    ]);
+    expect(query.orderBy).toHaveBeenCalledWith('message.senderId', 'ASC');
+    expect(query.addOrderBy.mock.calls).toEqual([
+      ['message.createdAt', 'DESC'],
+      ['message.id', 'DESC'],
+    ]);
+  });
+
+  it('returns an empty summary when there are no incoming messages', async () => {
+    query.getRawMany.mockResolvedValue([]);
+    await expect(service.incomingSummary('alice-id')).resolves.toEqual([]);
   });
 });

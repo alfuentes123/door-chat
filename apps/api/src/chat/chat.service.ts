@@ -80,6 +80,19 @@ export class ChatService {
             
     }
 
+    async incomingSummary(currentUserId: string) {
+        return this.messageRepository.createQueryBuilder('message')
+            .select('message.senderId', 'senderId')
+            .addSelect('message.id', 'id')
+            .addSelect('message.createdAt', 'createdAt')
+            .distinctOn(['message.senderId'])
+            .where('message.recipientId = :currentUserId', { currentUserId })
+            .orderBy('message.senderId', 'ASC')
+            .addOrderBy('message.createdAt', 'DESC')
+            .addOrderBy('message.id', 'DESC')
+            .getRawMany<{ senderId: string; id: string; createdAt: Date }>();
+    }
+
     async history(currentUserId: string, otherUserId: string) {
         const otherUser = await this.usersService.findPublicById(otherUserId);
         if (!otherUser) {

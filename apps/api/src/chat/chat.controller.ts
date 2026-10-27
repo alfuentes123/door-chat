@@ -9,6 +9,11 @@ import { SendMessageDto } from './dto/send-message.dto';
 export class ChatController {
   constructor(private readonly chatService: ChatService) {}
 
+  @Get('incoming-summary')
+  incomingSummary(@CurrentUser() userId: string) {
+    return this.chatService.incomingSummary(userId);
+  }
+
   @Get(':otherUserId/messages')
   history(
     @CurrentUser() userId: string,

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { api, ApiError } from './lib/api'
 import './App.css'
 import { socket } from './lib/socket';
@@ -19,6 +19,9 @@ type Message = {
   createdAt: string
 }
 
+type MessagePosition = Pick<Message, 'id' | 'createdAt'>
+type IncomingMessageSummary = Pick<Message, 'id' | 'senderId' | 'createdAt'>
+
 type PendingSend = {
   recipientId: string
   clientMessageId: string
@@ -29,6 +32,11 @@ type AuthMode = 'register' | 'login' | null
 
 function errorMessage(error: unknown, fallback = 'An unexpected error occurred') {
   return error instanceof Error ? error.message : fallback
+}
+
+function isNewerMessage(message: MessagePosition, seen: MessagePosition | undefined) {
+  return !seen || message.createdAt > seen.createdAt
+    || (message.createdAt === seen.createdAt && message.id > seen.id)
 }
 
 function App() {
@@ -60,12 +68,90 @@ function App() {
   const [pendingSend, setPendingSend] = useState<PendingSend | null>(null)
   const [sendNeedsCorrection, setSendNeedsCorrection] = useState(false)
   const [socketConnected, setSocketConnected] = useState(socket.connected)
+  const [unseenChatIds, setUnseenChatIds] = useState<Set<string>>(new Set())
+  const [notificationsError, setNotificationsError] = useState<string | null>(null)
   const sendRequest = useRef<PendingSend | null>(null)
   const activeChatUserId = useRef<string | undefined>(undefined)
   const historyRequestId = useRef(0)
+  const seenThrough = useRef(new Map<string, MessagePosition>())
+  const latestIncoming = useRef(new Map<string, IncomingMessageSummary>())
+  const notificationSession = useRef(0)
 
   const signedInUserId = currentUser?.id
   const openChatUserId = selectedUser?.id
+
+  const markChatSeen = useCallback((chatUserId: string, history: Message[]) => {
+    const newest = history.at(-1)
+    if (!newest) return
+
+    if (isNewerMessage(newest, seenThrough.current.get(chatUserId))) {
+      seenThrough.current.set(chatUserId, { id: newest.id, createdAt: newest.createdAt })
+    }
+
+    const incoming = latestIncoming.current.get(chatUserId)
+    if (incoming && isNewerMessage(incoming, seenThrough.current.get(chatUserId))) return
+
+    setUnseenChatIds((current) => {
+      if (!current.has(chatUserId)) return current
+      const updated = new Set(current)
+      updated.delete(chatUserId)
+      return updated
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!signedInUserId) return
+
+    const session = ++notificationSession.current
+    let active = true
+    let checking = false
+    let checkAgain = false
+    let initialIncoming: Map<string, string> | null = null
+    seenThrough.current.clear()
+    latestIncoming.current.clear()
+
+    const isActive = () => active && session === notificationSession.current
+    const refreshUnseenChats = async () => {
+      if (!isActive()) return
+      if (checking) {
+        checkAgain = true
+        return
+      }
+
+      checking = true
+      try {
+        do {
+          checkAgain = false
+          try {
+            const summary = await api<IncomingMessageSummary[]>('/chat/incoming-summary')
+            if (!isActive()) return
+
+            // Existing history is the baseline; only changes during this session are new.
+            const baseline = initialIncoming ??= new Map(summary.map((item) => [item.senderId, item.id]))
+            latestIncoming.current = new Map(summary.map((item) => [item.senderId, item]))
+            setUnseenChatIds(new Set(summary
+              .filter((item) => baseline.get(item.senderId) !== item.id
+                && isNewerMessage(item, seenThrough.current.get(item.senderId)))
+              .map((item) => item.senderId)))
+            setNotificationsError(null)
+          } catch (error) {
+            if (isActive()) setNotificationsError(errorMessage(error, 'Could not check for new messages'))
+          }
+        } while (isActive() && checkAgain)
+      } finally {
+        checking = false
+      }
+    }
+
+    socket.on('messages.changed', refreshUnseenChats)
+    socket.on('connect', refreshUnseenChats)
+    void refreshUnseenChats()
+    return () => {
+      active = false
+      socket.off('messages.changed', refreshUnseenChats)
+      socket.off('connect', refreshUnseenChats)
+    }
+  }, [signedInUserId])
 
   useEffect(() => {
     let active = true
@@ -79,6 +165,7 @@ function App() {
         .then((saved) => {
           if (!active || requestId !== historyRequestId.current) return
           setMessages(saved)
+          markChatSeen(openChatUserId, saved)
           setMessagesError(null)
           setLoadingMessages(false)
         })
@@ -98,7 +185,7 @@ function App() {
       socket.off('connect', onConnect)
       socket.off('disconnect', onDisconnect)
     }
-  }, [signedInUserId, openChatUserId])
+  }, [signedInUserId, openChatUserId, markChatSeen])
 
   useEffect(() => {
     if (!signedInUserId) return
@@ -121,6 +208,7 @@ function App() {
         .then((updatedMessages) => {
           if (!active || requestId !== historyRequestId.current) return
           setMessages(updatedMessages)
+          markChatSeen(openChatUserId, updatedMessages)
           setMessagesError(null)
           setLoadingMessages(false)
         })
@@ -137,7 +225,7 @@ function App() {
       active = false
       socket.off('messages.changed', refreshOpenChat)
     }
-  }, [signedInUserId, openChatUserId])
+  }, [signedInUserId, openChatUserId, markChatSeen])
 
   const loadUsers = async () => {
     setUsersError(null)
@@ -192,7 +280,10 @@ function App() {
 
       try {
         const history = await api<Message[]>(`/chat/${openChatUserId}/messages`)
-        if (active && requestId === historyRequestId.current) setMessages(history)
+        if (active && requestId === historyRequestId.current) {
+          setMessages(history)
+          markChatSeen(openChatUserId, history)
+        }
       } catch (error) {
         if (active && requestId === historyRequestId.current) {
           setMessagesError(errorMessage(error, 'Could not load messages'))
@@ -207,7 +298,7 @@ function App() {
     return () => {
       active = false
     }
-  }, [signedInUserId, openChatUserId])
+  }, [signedInUserId, openChatUserId, markChatSeen])
 
   const handleRegister = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -254,6 +345,12 @@ function App() {
     try {
       await api('/auth/logout', 'POST')
       sendRequest.current = null
+      historyRequestId.current++
+      notificationSession.current++
+      seenThrough.current.clear()
+      latestIncoming.current.clear()
+      setUnseenChatIds(new Set())
+      setNotificationsError(null)
       setCurrentUser(null)
       setUsers([])
       setSelectedUser(null)
@@ -411,17 +508,19 @@ function App() {
         <h1>DoorChat</h1>
         <h2>Available users</h2>
         {usersError && <p className="error" role="alert">{usersError}</p>}
+        {notificationsError && <p className="error" role="alert">New message indicators may be out of date: {notificationsError}</p>}
         {!usersError && users.length === 0 && <p>No other users are available.</p>}
         <div className="user-list">
           {users.map((user) => (
             <button
               type="button"
               key={user.id}
-              aria-label={`Chat with ${user.displayName}`}
+              aria-label={`Chat with ${user.displayName}${unseenChatIds.has(user.id) ? ' (unseen message)' : ''}`}
               aria-pressed={selectedUser?.id === user.id}
               onClick={() => setSelectedUser(user)}
             >
-              {user.displayName}
+              <span>{user.displayName}</span>
+              {unseenChatIds.has(user.id) && <span className="unseen-dot" aria-hidden="true" title="Unseen message" />}
             </button>
           ))}
         </div>
@@ -430,7 +529,7 @@ function App() {
       <section className="chat-panel" aria-label="Selected chat">
         <header className="chat-header">
           {currentUser && <p className="current-user">Signed in as {currentUser.displayName}</p>}
-          <p role="status">{socketConnected ? 'Live updates connected' : 'Reconnecting...'}</p>
+          {!socketConnected && <p role="status">Reconnecting...</p>}
           <button className="logout-button" type="button" onClick={handleLogout}>Log out</button>
         </header>
         {logoutError && <p className="error logout-error" role="alert">{logoutError}</p>}
